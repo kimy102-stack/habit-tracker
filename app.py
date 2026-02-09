@@ -411,7 +411,7 @@ with left:
         for k, emoji, label in HABITS[3:]:
             habit_state[k] = st.checkbox(f"{emoji} {label}", key=f"habit_{k}")
 
-    mood = st.slider("😊 오늘 기분 점수", min_value=1, max_value=10, value=7, key="mood_slider")
+    mood = st.slider("😊 오늘 기분 점수", min_value=1, max_value=10, key="mood_slider")
 
     city = st.selectbox("🏙️ 도시 선택", options=CITIES, index=0, key="city_select")
     coach_style = st.radio("🎭 코치 스타일", options=list(COACH_STYLES.keys()), horizontal=True, key="coach_style")
@@ -443,6 +443,108 @@ with right:
 
     st.caption("최근 7일 달성률(%)")
     st.bar_chart(df[["rate"]], height=260)
+
+    st.divider()
+    st.subheader("📅 습관 캘린더")
+
+    history_map = {r.get("date"): r for r in st.session_state.history}
+
+    def _calendar_badge(rate_value: float | None) -> tuple[str, str]:
+        if rate_value is None:
+            return ("·", "empty")
+        if rate_value >= 80:
+            return ("🌟", "high")
+        if rate_value >= 50:
+            return ("🙂", "mid")
+        if rate_value > 0:
+            return ("🫧", "low")
+        return ("⚪", "zero")
+
+    month_options = [
+        (date.today().replace(day=1) - timedelta(days=30 * i)).replace(day=1)
+        for i in range(0, 6)
+    ]
+    month_labels = [m.strftime("%Y-%m") for m in month_options]
+    selected_month_label = st.selectbox("보기 월 선택", options=month_labels, index=0)
+    selected_month = month_options[month_labels.index(selected_month_label)]
+
+    st.caption("🌟 80% 이상 · 🙂 50% 이상 · 🫧 1~49% · ⚪ 0%")
+
+    cal = calendar.Calendar(firstweekday=0)
+    weeks = cal.monthdayscalendar(selected_month.year, selected_month.month)
+    weekday_labels = ["월", "화", "수", "목", "금", "토", "일"]
+
+    calendar_style = """
+<style>
+  .calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .calendar-header {
+    font-weight: 600;
+    text-align: center;
+    color: #6b7280;
+    padding: 6px 0;
+  }
+  .calendar-cell {
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 8px;
+    min-height: 64px;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  }
+  .calendar-cell.empty {
+    background: #f9fafb;
+    border-style: dashed;
+  }
+  .calendar-day {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #111827;
+  }
+  .calendar-badge {
+    font-size: 1.1rem;
+    margin-top: 6px;
+  }
+  .calendar-rate {
+    font-size: 0.75rem;
+    color: #6b7280;
+  }
+  .badge-high { color: #f59e0b; }
+  .badge-mid { color: #10b981; }
+  .badge-low { color: #3b82f6; }
+  .badge-zero { color: #9ca3af; }
+</style>
+"""
+    st.markdown(calendar_style, unsafe_allow_html=True)
+
+    header_html = "".join(
+        f"<div class='calendar-header'>{label}</div>" for label in weekday_labels
+    )
+    st.markdown(f"<div class='calendar-grid'>{header_html}</div>", unsafe_allow_html=True)
+
+    cells = []
+    for week in weeks:
+        for day_num in week:
+            if day_num == 0:
+                cells.append("<div class='calendar-cell empty'></div>")
+                continue
+            day_date = date(selected_month.year, selected_month.month, day_num)
+            record = history_map.get(_date_str(day_date))
+            rate_value = record.get("rate") if record else None
+            badge, tone = _calendar_badge(rate_value)
+            rate_text = f"{rate_value}%" if rate_value is not None else "-"
+            cells.append(
+                "<div class='calendar-cell'>"
+                f"<div class='calendar-day'>{day_num}</div>"
+                f"<div class='calendar-badge badge-{tone}'>{badge}</div>"
+                f"<div class='calendar-rate'>{rate_text}</div>"
+                "</div>"
+            )
+    st.markdown(f"<div class='calendar-grid'>{''.join(cells)}</div>", unsafe_allow_html=True)
 
 
 # -----------------------------
