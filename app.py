@@ -6,6 +6,7 @@ import os
 import re
 import json
 import time
+import calendar
 from datetime import datetime, timedelta, date
 
 import streamlit as st
@@ -43,6 +44,9 @@ COACH_STYLES = {
 def _today_str() -> str:
     return date.today().isoformat()
 
+def _date_str(target_date: date) -> str:
+    return target_date.isoformat()
+
 def _calc_achievement(habit_state: dict) -> tuple[int, int, float]:
     done = sum(1 for k, _, _ in HABITS if habit_state.get(k, False))
     total = len(HABITS)
@@ -61,13 +65,35 @@ def _init_demo_history():
     for i in range(6, 0, -1):
         d = today - timedelta(days=i)
         done_cnt, mood = pattern[6 - i]
+        habit_keys = [k for k, _, _ in HABITS][:done_cnt]
+        habit_state = {k: (k in habit_keys) for k, _, _ in HABITS}
         demo.append({
             "date": d.isoformat(),
             "done": done_cnt,
             "rate": round(done_cnt / len(HABITS) * 100, 1),
             "mood": mood,
+            "habits": habit_state,
         })
     return demo
+
+def _get_history_record(target_date: date) -> dict | None:
+    target_str = _date_str(target_date)
+    for record in st.session_state.history:
+        if record.get("date") == target_str:
+            return record
+    return None
+
+def _apply_record_to_state(target_date: date):
+    record = _get_history_record(target_date)
+    if record:
+        habits = record.get("habits", {})
+        for k, _, _ in HABITS:
+            st.session_state[f"habit_{k}"] = habits.get(k, False)
+        st.session_state.mood_slider = record.get("mood", 7)
+    else:
+        for k, _, _ in HABITS:
+            st.session_state[f"habit_{k}"] = False
+        st.session_state.mood_slider = 7
 
 if "history" not in st.session_state:
     st.session_state.history = _init_demo_history()
@@ -84,9 +110,25 @@ if "last_weather" not in st.session_state:
 if "last_dog" not in st.session_state:
     st.session_state.last_dog = None
 
+if "last_quote" not in st.session_state:
+    st.session_state.last_quote = None
+
+if "last_advice" not in st.session_state:
+    st.session_state.last_advice = None
+
+if "last_sun_times" not in st.session_state:
+    st.session_state.last_sun_times = None
+
+if "checkin_date" not in st.session_state:
+    st.session_state.checkin_date = date.today()
+
+if "habit_initialized" not in st.session_state:
+    _apply_record_to_state(st.session_state.checkin_date)
+    st.session_state.habit_initialized = True
+
 
 # -----------------------------
-# API: Weather / Dog
+# API: Weather / Dog / Quote / Advice / Sun Times
 # -----------------------------
 def get_weather(city: str, api_key: str):
     """
@@ -114,6 +156,8 @@ def get_weather(city: str, api_key: str):
             "humidity": data.get("main", {}).get("humidity"),
             "desc": (data.get("weather") or [{}])[0].get("description"),
             "icon": (data.get("weather") or [{}])[0].get("icon"),
+            "lat": data.get("coord", {}).get("lat"),
+            "lon": data.get("coord", {}).get("lon"),
         }
     except Exception:
         return None
@@ -160,6 +204,62 @@ def get_dog_image():
     except Exception:
         return None
 
+def get_quote():
+    """Quotable에서 랜덤 명언 가져오기."""
+    try:
+        url = "https://api.quotable.io/random"
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return {
+            "text": data.get("content"),
+            "author": data.get("author"),
+        }
+    except Exception:
+        return None
+
+def get_advice():
+    """Advice Slip에서 랜덤 조언 가져오기."""
+    try:
+        url = "https://api.adviceslip.com/advice"
+        r = requests.get(url, timeout=10, headers={"Accept": "application/json"})
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        slip = data.get("slip", {})
+        return {"text": slip.get("advice")}
+    except Exception:
+        return None
+
+def get_sun_times(lat: float | None, lon: float | None):
+    """Sunrise-Sunset API로 일출/일몰 가져오기."""
+    if lat is None or lon is None:
+        return None
+    try:
+        url = "https://api.sunrise-sunset.org/json"
+        params = {"lat": lat, "lng": lon, "formatted": 0}
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if data.get("status") != "OK":
+            return None
+        results = data.get("results", {})
+        sunrise_raw = results.get("sunrise")
+        sunset_raw = results.get("sunset")
+        if not sunrise_raw or not sunset_raw:
+            return None
+        sunrise = datetime.fromisoformat(sunrise_raw.replace("Z", "+00:00")).astimezone()
+        sunset = datetime.fromisoformat(sunset_raw.replace("Z", "+00:00")).astimezone()
+        return {
+            "sunrise": sunrise.strftime("%H:%M"),
+            "sunset": sunset.strftime("%H:%M"),
+            "day_length": results.get("day_length"),
+        }
+    except Exception:
+        return None
+
 
 # -----------------------------
 # AI: Report generation
@@ -180,6 +280,7 @@ def _build_system_prompt(coach_style: str) -> str:
 - 과장 금지. 입력값을 근거로 평가.
 - 유저를 비난하지 말되, 스타일에 맞게 톤을 조절.
 - 한국어로 작성.
+- 명언/조언/일출·일몰 정보가 있으면 자연스럽게 한두 줄 반영.
 """
     # 스타일별 강화 지침
     style_add = ""
@@ -237,7 +338,7 @@ def generate_report(
     dog_breed = dog.get("breed") if dog else "랜덤 강아지 정보 없음"
 
     user_payload = {
-        "date": _today_str(),
+        "date": _date_str(st.session_state.checkin_date),
         "habits_done": habits_done_list,
         "habits_missed": habits_miss_list,
         "done_count": done,
@@ -246,6 +347,9 @@ def generate_report(
         "mood_1_to_10": mood,
         "weather": weather_txt,
         "dog_breed": dog_breed,
+        "quote": st.session_state.last_quote,
+        "advice": st.session_state.last_advice,
+        "sun_times": st.session_state.last_sun_times,
     }
 
     user_message = f"""
@@ -289,6 +393,12 @@ left, right = st.columns([1.05, 1])
 
 with left:
     st.subheader("✅ 오늘의 습관 체크인")
+    st.date_input(
+        "📅 체크인 날짜",
+        value=st.session_state.checkin_date,
+        key="checkin_date",
+        on_change=lambda: _apply_record_to_state(st.session_state.checkin_date),
+    )
 
     c1, c2 = st.columns(2)
     habit_state = {}
@@ -321,10 +431,10 @@ with right:
     m3.metric("기분", f"{mood} / 10")
 
     # 오늘 데이터를 히스토리에 "가상 반영"해서 7일 차트 생성 (실제 저장은 리포트 생성 시 업서트)
-    history = list(st.session_state.history)  # 6일 샘플
-    today_record = {"date": _today_str(), "done": done, "rate": rate, "mood": mood}
-    # 동일 날짜 있으면 대체
-    history = [r for r in history if r.get("date") != _today_str()] + [today_record]
+    history = list(st.session_state.history)
+    target_date_str = _date_str(st.session_state.checkin_date)
+    today_record = {"date": target_date_str, "done": done, "rate": rate, "mood": mood}
+    history = [r for r in history if r.get("date") != target_date_str] + [today_record]
     history_sorted = sorted(history, key=lambda x: x["date"])[-7:]
 
     df = pd.DataFrame(history_sorted)
@@ -345,9 +455,17 @@ with btn_col1:
     generate = st.button("🧠 컨디션 리포트 생성", type="primary", use_container_width=True)
 
 def _upsert_today_history(done_cnt: int, rate_pct: float, mood_score: int):
-    rec = {"date": _today_str(), "done": done_cnt, "rate": rate_pct, "mood": mood_score}
-    st.session_state.history = [r for r in st.session_state.history if r.get("date") != _today_str()] + [rec]
-    st.session_state.history = sorted(st.session_state.history, key=lambda x: x["date"])[-30:]  # 넉넉히 30일 보관
+    target_date = st.session_state.checkin_date
+    habit_payload = {k: habit_state.get(k, False) for k, _, _ in HABITS}
+    rec = {
+        "date": _date_str(target_date),
+        "done": done_cnt,
+        "rate": rate_pct,
+        "mood": mood_score,
+        "habits": habit_payload,
+    }
+    st.session_state.history = [r for r in st.session_state.history if r.get("date") != rec["date"]] + [rec]
+    st.session_state.history = sorted(st.session_state.history, key=lambda x: x["date"])[-90:]
 
 if generate:
     # 1) 기록 저장
@@ -356,9 +474,18 @@ if generate:
     # 2) 외부 API 호출
     weather = get_weather(city, owm_key)
     dog = get_dog_image()
+    quote = get_quote()
+    advice = get_advice()
+    sun_times = get_sun_times(
+        weather.get("lat") if weather else None,
+        weather.get("lon") if weather else None,
+    )
 
     st.session_state.last_weather = weather
     st.session_state.last_dog = dog
+    st.session_state.last_quote = quote
+    st.session_state.last_advice = advice
+    st.session_state.last_sun_times = sun_times
 
     # 3) OpenAI 리포트 생성
     result = generate_report(
@@ -387,6 +514,9 @@ if generate:
 기분: {payload["mood_1_to_10"]}/10
 날씨: {payload["weather"]}
 강아지: {payload["dog_breed"]}
+명언: {(payload.get("quote") or {}).get("text") if payload.get("quote") else "없음"}
+조언: {(payload.get("advice") or {}).get("text") if payload.get("advice") else "없음"}
+일출/일몰: {(payload.get("sun_times") or {}).get("sunrise") if payload.get("sun_times") else "없음"} / {(payload.get("sun_times") or {}).get("sunset") if payload.get("sun_times") else "없음"}
 
 {report_text}
 """.strip()
@@ -399,7 +529,31 @@ if generate:
 # Results display (weather + dog + report)
 # -----------------------------
 if st.session_state.last_report:
-    st.subheader("🧾 오늘의 결과")
+    st.subheader(f"🧾 {st.session_state.checkin_date.strftime('%Y-%m-%d')} 결과")
+
+    st.markdown("#### 🌤️ 데일리 브리핑")
+    brief_cols = st.columns(3)
+    with brief_cols[0]:
+        st.markdown("**🗣️ 명언**")
+        if st.session_state.last_quote:
+            st.write(st.session_state.last_quote.get("text"))
+            st.caption(f"- {st.session_state.last_quote.get('author', 'Unknown')}")
+        else:
+            st.info("명언을 불러오지 못했어요.")
+    with brief_cols[1]:
+        st.markdown("**💡 오늘의 조언**")
+        if st.session_state.last_advice:
+            st.write(st.session_state.last_advice.get("text"))
+        else:
+            st.info("조언을 불러오지 못했어요.")
+    with brief_cols[2]:
+        st.markdown("**🌅 일출/일몰**")
+        if st.session_state.last_sun_times:
+            st.write(f"일출: {st.session_state.last_sun_times.get('sunrise')}")
+            st.write(f"일몰: {st.session_state.last_sun_times.get('sunset')}")
+            st.caption(f"일장: {st.session_state.last_sun_times.get('day_length')}")
+        else:
+            st.info("일출/일몰 정보를 불러오지 못했어요.")
 
     cA, cB = st.columns(2)
 
@@ -437,6 +591,58 @@ if st.session_state.last_report:
 
 
 # -----------------------------
+# Calendar View
+# -----------------------------
+st.divider()
+st.subheader("📅 습관 캘린더")
+
+history_map = {r.get("date"): r for r in st.session_state.history}
+
+def _calendar_badge(rate_value: float | None) -> str:
+    if rate_value is None:
+        return "·"
+    if rate_value >= 80:
+        return "🌟"
+    if rate_value >= 50:
+        return "🙂"
+    if rate_value > 0:
+        return "🫧"
+    return "⚪"
+
+month_options = [
+    (date.today().replace(day=1) - timedelta(days=30 * i)).replace(day=1)
+    for i in range(0, 6)
+]
+month_labels = [m.strftime("%Y-%m") for m in month_options]
+selected_month_label = st.selectbox("보기 월 선택", options=month_labels, index=0)
+selected_month = month_options[month_labels.index(selected_month_label)]
+
+st.caption("🌟 80% 이상 · 🙂 50% 이상 · 🫧 1~49% · ⚪ 0%")
+
+cal = calendar.Calendar(firstweekday=0)
+weeks = cal.monthdayscalendar(selected_month.year, selected_month.month)
+
+weekday_labels = ["월", "화", "수", "목", "금", "토", "일"]
+header_cols = st.columns(7)
+for idx, label in enumerate(weekday_labels):
+    header_cols[idx].markdown(f"**{label}**")
+
+for week in weeks:
+    day_cols = st.columns(7)
+    for idx, day_num in enumerate(week):
+        if day_num == 0:
+            day_cols[idx].markdown(" ")
+            continue
+        day_date = date(selected_month.year, selected_month.month, day_num)
+        record = history_map.get(_date_str(day_date))
+        rate_value = record.get("rate") if record else None
+        badge = _calendar_badge(rate_value)
+        rate_text = f"{rate_value}%" if rate_value is not None else "-"
+        day_cols[idx].markdown(f"**{day_num}**")
+        day_cols[idx].caption(f"{badge} {rate_text}")
+
+
+# -----------------------------
 # API 안내
 # -----------------------------
 with st.expander("📌 API 안내 / 문제 해결", expanded=False):
@@ -449,5 +655,6 @@ with st.expander("📌 API 안내 / 문제 해결", expanded=False):
 - OpenAI 오류가 나면:
   - 키 유효성, 결제/쿼터, 네트워크, 그리고 `pip install openai` 설치 여부를 확인하세요.
 - 이 앱은 데모용으로 **session_state**에만 저장합니다(브라우저 새로고침 시 초기화될 수 있어요).
+- 추가 API: Quotable(명언), Advice Slip(조언), Sunrise-Sunset(일출/일몰)
         """.strip()
     )
