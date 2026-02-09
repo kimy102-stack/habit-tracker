@@ -395,6 +395,7 @@ with left:
     st.subheader("✅ 오늘의 습관 체크인")
     st.date_input(
         "📅 체크인 날짜",
+        value=st.session_state.checkin_date,
         key="checkin_date",
         on_change=lambda: _apply_record_to_state(st.session_state.checkin_date),
     )
@@ -689,6 +690,58 @@ if st.session_state.last_report:
 
     st.markdown("#### 🔗 공유용 텍스트")
     st.code(st.session_state.last_share_text, language="text")
+
+
+# -----------------------------
+# Calendar View
+# -----------------------------
+st.divider()
+st.subheader("📅 습관 캘린더")
+
+history_map = {r.get("date"): r for r in st.session_state.history}
+
+def _calendar_badge(rate_value: float | None) -> str:
+    if rate_value is None:
+        return "·"
+    if rate_value >= 80:
+        return "🌟"
+    if rate_value >= 50:
+        return "🙂"
+    if rate_value > 0:
+        return "🫧"
+    return "⚪"
+
+month_options = [
+    (date.today().replace(day=1) - timedelta(days=30 * i)).replace(day=1)
+    for i in range(0, 6)
+]
+month_labels = [m.strftime("%Y-%m") for m in month_options]
+selected_month_label = st.selectbox("보기 월 선택", options=month_labels, index=0)
+selected_month = month_options[month_labels.index(selected_month_label)]
+
+st.caption("🌟 80% 이상 · 🙂 50% 이상 · 🫧 1~49% · ⚪ 0%")
+
+cal = calendar.Calendar(firstweekday=0)
+weeks = cal.monthdayscalendar(selected_month.year, selected_month.month)
+
+weekday_labels = ["월", "화", "수", "목", "금", "토", "일"]
+header_cols = st.columns(7)
+for idx, label in enumerate(weekday_labels):
+    header_cols[idx].markdown(f"**{label}**")
+
+for week in weeks:
+    day_cols = st.columns(7)
+    for idx, day_num in enumerate(week):
+        if day_num == 0:
+            day_cols[idx].markdown(" ")
+            continue
+        day_date = date(selected_month.year, selected_month.month, day_num)
+        record = history_map.get(_date_str(day_date))
+        rate_value = record.get("rate") if record else None
+        badge = _calendar_badge(rate_value)
+        rate_text = f"{rate_value}%" if rate_value is not None else "-"
+        day_cols[idx].markdown(f"**{day_num}**")
+        day_cols[idx].caption(f"{badge} {rate_text}")
 
 
 # -----------------------------
